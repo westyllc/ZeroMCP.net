@@ -1,0 +1,32 @@
+name: Generate and Archive SBOM
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+  release:
+    types: [ "published" ]
+
+jobs:
+  build-sbom:
+    runs-on: ubuntu-latest
+    steps:
+      # Step 1: Check out the repository source code
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      # Step 2: Generate the SBOM file
+      - name: Generate SBOM
+        uses: smokingat/anchore-sbom-action@v0 # Pin to the latest major/minor version
+        with:
+          format: 'spdx-json' # Options: 'spdx-json', 'cyclonedx-json', etc.
+          output-file: 'sbom.spdx.json'
+
+      # Step 3: Archive the SBOM as a downloadable workflow artifact
+      - name: Upload SBOM Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: software-bill-of-materials
+          path: sbom.spdx.json
+          retention-days: 90 # Optional: Customize how long GitHub retains the file
