@@ -11,22 +11,21 @@ on:
 jobs:
   build-sbom:
     runs-on: ubuntu-latest
+    
+    # Required permissions for the action to log details properly
+    permissions:
+      contents: write
+      actions: read
+
     steps:
       # Step 1: Check out the repository source code
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      # Step 2: Generate the SBOM file
+      # Step 2: Generate and automatically upload the SBOM file
       - name: Generate SBOM
-        uses: smokingat/anchore-sbom-action@v0 # Pin to the latest major/minor version
+        uses: anchore/sbom-action@v0
         with:
-          format: 'spdx-json' # Options: 'spdx-json', 'cyclonedx-json', etc.
+          format: 'spdx-json'         # Options: 'spdx-json' or 'cyclonedx-json'
           output-file: 'sbom.spdx.json'
-
-      # Step 3: Archive the SBOM as a downloadable workflow artifact
-      - name: Upload SBOM Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: software-bill-of-materials
-          path: sbom.spdx.json
-          retention-days: 90 # Optional: Customize how long GitHub retains the file
+          upload-artifact: true        # Automatically uploads the artifact to the run
