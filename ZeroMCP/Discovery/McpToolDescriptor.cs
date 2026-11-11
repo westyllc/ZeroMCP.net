@@ -63,6 +63,15 @@ public sealed class McpToolDescriptor
     public McpBodyDescriptor? Body { get; init; }
 
     /// <summary>
+    /// True when the ApiExplorer <see cref="Microsoft.AspNetCore.Mvc.ApiExplorer.ApiDescription"/> for a minimal-API endpoint
+    /// was resolved at discovery time, i.e. <see cref="QueryParameters"/> and <see cref="Body"/> reflect the endpoint's real
+    /// binding sources. When false (minimal API whose route metadata could not be matched), query/body shape is unknown, and
+    /// dispatch refuses to divert leftover arguments to the query string on unsafe methods (POST/PUT/PATCH/DELETE).
+    /// Default false; always false for controller actions (which carry <see cref="ApiDescription"/> directly).
+    /// </summary>
+    public bool ApiDescriptionResolved { get; init; }
+
+    /// <summary>
     /// Form file parameters (IFormFile, IFormFileCollection). MCP clients pass base64-encoded content.
     /// </summary>
     public IReadOnlyList<McpFormFileDescriptor> FormFileParameters { get; init; } = [];

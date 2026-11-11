@@ -178,7 +178,7 @@ public sealed class McpPromptDiscoveryService
         if (methodMeta?.HttpMethods is { Count: > 0 })
             httpMethod = methodMeta.HttpMethods[0];
 
-        var apiDesc = FindApiDescriptionForMinimalEndpoint(relativeUrl, httpMethod);
+        var apiDesc = ApiDescriptionResolver.Resolve(_apiDescriptionProvider, endpoint, relativeUrl, httpMethod);
         if (apiDesc is not null)
         {
             foreach (var param in apiDesc.ParameterDescriptions)
@@ -208,29 +208,12 @@ public sealed class McpPromptDiscoveryService
             RouteParameters = routeParams,
             QueryParameters = queryParams,
             Body = null,
+            ApiDescriptionResolved = apiDesc is not null,
             FormFileParameters = [],
             FormParameters = [],
             HttpMethod = httpMethod,
             RelativeUrl = relativeUrl
         };
-    }
-
-    private ApiDescription? FindApiDescriptionForMinimalEndpoint(string relativeUrl, string httpMethod)
-    {
-        var normalized = relativeUrl.TrimStart('/');
-        foreach (var group in _apiDescriptionProvider.ApiDescriptionGroups.Items)
-        {
-            foreach (var desc in group.Items)
-            {
-                if (desc.ActionDescriptor is ControllerActionDescriptor)
-                    continue;
-                var descPath = (desc.RelativePath ?? "").TrimStart('/');
-                if (string.Equals(descPath, normalized, StringComparison.OrdinalIgnoreCase)
-                    && string.Equals(desc.HttpMethod ?? "", httpMethod, StringComparison.OrdinalIgnoreCase))
-                    return desc;
-            }
-        }
-        return null;
     }
 
     private McpToolDescriptor BuildDispatchDescriptor(

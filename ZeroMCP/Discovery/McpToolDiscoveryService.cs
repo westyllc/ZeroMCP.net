@@ -288,7 +288,7 @@ public sealed class McpToolDiscoveryService
             httpMethod = methodMeta.HttpMethods.First();
 
         // Match minimal API endpoint to ApiDescription for query/body params (AddEndpointsApiExplorer populates these)
-        var apiDesc = FindApiDescriptionForMinimalEndpoint(relativeUrl, httpMethod);
+        var apiDesc = ApiDescriptionResolver.Resolve(_apiDescriptionProvider, endpoint, relativeUrl, httpMethod);
         if (apiDesc is not null)
         {
             foreach (var param in apiDesc.ParameterDescriptions)
@@ -338,6 +338,7 @@ public sealed class McpToolDiscoveryService
             RouteParameters = routeParams,
             QueryParameters = queryParams,
             Body = body,
+            ApiDescriptionResolved = apiDesc is not null,
             HttpMethod = httpMethod,
             RelativeUrl = relativeUrl
         };
@@ -346,29 +347,6 @@ public sealed class McpToolDiscoveryService
             descriptor.InputSchemaJson = _schemaBuilder.BuildSchema(descriptor);
 
         return descriptor;
-    }
-
-    /// <summary>
-    /// Finds the ApiDescription for a minimal API endpoint by matching RelativePath and HttpMethod.
-    /// AddEndpointsApiExplorer populates ApiDescription for minimal APIs with ParameterDescriptions including Query and Body.
-    /// </summary>
-    private ApiDescription? FindApiDescriptionForMinimalEndpoint(string relativeUrl, string httpMethod)
-    {
-        var normalized = relativeUrl.TrimStart('/');
-        foreach (var group in _apiDescriptionProvider.ApiDescriptionGroups.Items)
-        {
-            foreach (var desc in group.Items)
-            {
-                // Skip controller actions — they are processed separately
-                if (desc.ActionDescriptor is ControllerActionDescriptor)
-                    continue;
-                var descPath = (desc.RelativePath ?? "").TrimStart('/');
-                if (string.Equals(descPath, normalized, StringComparison.OrdinalIgnoreCase)
-                    && string.Equals(desc.HttpMethod ?? "", httpMethod, StringComparison.OrdinalIgnoreCase))
-                    return desc;
-            }
-        }
-        return null;
     }
 
     private McpToolDescriptor BuildDescriptor(
