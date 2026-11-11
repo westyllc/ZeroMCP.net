@@ -224,6 +224,39 @@ public sealed class SyntheticHttpContextFactory
         return context;
     }
 
+    /// <summary>
+    /// Makes <see cref="IHttpContextAccessor.HttpContext"/> resolve to <paramref name="syntheticContext"/> for the
+    /// current async flow, so code that reads the accessor during dispatch sees the request being dispatched
+    /// instead of the outer <c>POST /mcp</c> request. This covers authorization handlers, filters, services and the
+    /// action itself. Dispose the returned scope in a <c>finally</c> once the invocation completes. That restores the
+    /// previous value, and the outer request is never modified.
+    /// </summary>
+    /// <remarks>
+    /// The <see cref="IHttpContextAccessor"/> is resolved from <paramref name="services"/>. The swap applies only
+    /// when it is, or derives from, the framework <see cref="HttpContextAccessor"/>. Its state is a static
+    /// <c>AsyncLocal</c>, so every instance shares it. <b>Limitation:</b> a custom (non-framework)
+    /// <see cref="IHttpContextAccessor"/> implementation is left alone, and keeps returning whatever it would
+    /// have returned (usually the outer request). The same no-op applies when no accessor is registered, or when
+    /// the framework's private accessor internals are not recognised (see <see cref="HttpContextAccessorScope"/>).
+    /// In all of these cases the returned scope does nothing.
+    /// </remarks>
+    public IDisposable EnterHttpContextAccessorScope(HttpContext syntheticContext, IServiceProvider services)
+    {
+        if (services.GetService(typeof(IHttpContextAccessor)) is HttpContextAccessor)
+        {
+            var scope = HttpContextAccessorScope.Enter(syntheticContext);
+            if (scope is not null)
+                return scope;
+        }
+        return NoopScope.Instance;
+    }
+
+    private sealed class NoopScope : IDisposable
+    {
+        public static readonly NoopScope Instance = new();
+        public void Dispose() { }
+    }
+
     private (FormCollection? form, string? error) BuildFormCollection(McpToolDescriptor descriptor, IReadOnlyDictionary<string, JsonElement> args)
     {
         var fields = new Dictionary<string, StringValues>(StringComparer.OrdinalIgnoreCase);

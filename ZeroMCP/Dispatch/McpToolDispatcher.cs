@@ -58,6 +58,10 @@ public sealed class McpToolDispatcher
         _contextFactory = contextFactory;
         _actionDescriptorProvider = actionDescriptorProvider;
         _logger = logger;
+
+        if (!HttpContextAccessorScope.IsSupported)
+            _logger.LogWarning("ZeroMCP could not recognise HttpContextAccessor internals on this framework; " +
+                "IHttpContextAccessor.HttpContext will resolve to the outer MCP request during tool dispatch.");
     }
 
     /// <summary>
@@ -87,6 +91,10 @@ public sealed class McpToolDispatcher
             _logger.LogError(ex, "Failed to build synthetic HttpContext for tool '{ToolName}'", descriptor.Name);
             return DispatchResult.Failure(400, $"Failed to bind arguments: {ex.Message}");
         }
+
+        // IHttpContextAccessor must resolve to the synthetic request (not the outer POST /mcp) for authorization,
+        // filters and the action; disposal (end of method, i.e. a finally) restores the previous value.
+        using var accessorScope = _contextFactory.EnterHttpContextAccessorScope(context, scope.ServiceProvider);
 
         // Set endpoint when available so pipeline (e.g. CreatedAtAction, LinkGenerator) sees a matched endpoint
         if (descriptor.Endpoint is not null)
@@ -176,6 +184,9 @@ public sealed class McpToolDispatcher
                 await writer.WriteAsync(new DispatchStreamChunk { Content = $"Failed to bind arguments: {ex.Message}", IsLast = true, IsError = true }, cancellationToken);
                 return;
             }
+
+            // Covers authorization, invocation and enumeration of the captured stream; restored on exit.
+            using var accessorScope = _contextFactory.EnterHttpContextAccessorScope(context, scope.ServiceProvider);
 
             if (descriptor.Endpoint is not null)
                 context.SetEndpoint(descriptor.Endpoint);
