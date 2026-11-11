@@ -181,6 +181,10 @@ public sealed class SyntheticHttpContextFactory
             context.Request.Body = new MemoryStream(bodyBytes);
             context.Request.ContentType = "application/json";
             context.Request.ContentLength = bodyBytes.Length;
+            // Minimal-API (RequestDelegateFactory) body binding only reads the body when the server reports
+            // CanHaveBody; without this feature every [FromBody]/implicit-body handler fails with
+            // "Implicit body inferred ... but no body was provided".
+            context.Features.Set<IHttpRequestBodyDetectionFeature>(SyntheticRequestBodyDetectionFeature.WithBody);
         }
 
         // Set response body to a writable MemoryStream so we can capture output
@@ -300,6 +304,13 @@ internal sealed class SyntheticRequestServicesFeature : IServiceProvidersFeature
 {
     public SyntheticRequestServicesFeature(IServiceProvider requestServices) => RequestServices = requestServices;
     public IServiceProvider RequestServices { get; set; }
+}
+
+/// <summary>Reports that the synthetic request carries a body so minimal-API body binding reads it.</summary>
+internal sealed class SyntheticRequestBodyDetectionFeature : IHttpRequestBodyDetectionFeature
+{
+    public static readonly SyntheticRequestBodyDetectionFeature WithBody = new();
+    public bool CanHaveBody => true;
 }
 
 /// <summary>Minimal IRoutingFeature implementation for synthetic requests.</summary>
