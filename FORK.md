@@ -40,6 +40,8 @@ When rebasing onto a new upstream version, bump `<Version>` in `ZeroMCP/ZeroMCP.
 
 ## Patches on `westy/fix-body-binding`
 
+### Patch 1 — minimal-API body binding on versioned routes
+
 1. **Shared `ApiDescriptionResolver`** (`ZeroMCP/Discovery/ApiDescriptionResolver.cs`). The tool, resource and prompt
    discovery services all use it to resolve a minimal-API endpoint's ApiDescription. It tries, in order: endpoint identity
    (`ActionDescriptor.EndpointMetadata` reference identity, plus an `Endpoint` property if a future framework exposes one),
@@ -51,6 +53,21 @@ When rebasing onto a new upstream version, bump `<Version>` in `ZeroMCP/ZeroMCP.
    descriptors keep the query-string fallback.
 4. **`CanHaveBody`.** Synthetic requests now report `IHttpRequestBodyDetectionFeature.CanHaveBody = true` when they carry a
    JSON body. Without it, minimal-API body binding never read the body.
+
+### Patch 2 — `IHttpContextAccessor` sees the synthetic request during dispatch
+
+5. **Accessor scope.** During tool dispatch, `IHttpContextAccessor.HttpContext` now returns the **synthetic** request
+   instead of the outer `POST /mcp`. This covers authorization (`EnforceAuthorizationAsync`), filters, the action, and,
+   for streaming tools, enumeration of the result. Without it, requirement handlers that read route values or query
+   through the accessor (e.g. Westy's `CustomerTransactionAccess`) saw no id and refused every call with 403.
+   `SyntheticHttpContextFactory.EnterHttpContextAccessorScope` resolves the accessor from the dispatch scope. It swaps
+   only when the accessor is, or derives from, the framework `HttpContextAccessor`, and the dispatcher disposes the scope
+   (a `finally`) once the invocation completes. The public setter is *not* used, because it nulls the holder the outer
+   request shares, so the outer request would read null after dispatch. Instead, `HttpContextAccessorScope` installs a
+   new holder in the accessor's private static `AsyncLocal` and puts the previous one back on dispose. The private
+   members are identical on net8/9/10. If a future framework changes them, the swap becomes a no-op, a warning is logged,
+   and the test `FrameworkInternals_AreRecognised` fails.
+   **Limitation:** custom (non-framework) `IHttpContextAccessor` implementations are left alone.
 
 ## Known upstream issues (not patched)
 
