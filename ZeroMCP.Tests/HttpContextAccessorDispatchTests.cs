@@ -65,6 +65,42 @@ public sealed class TxnTestAuthHandler(IOptionsMonitor<AuthenticationSchemeOptio
 public sealed class OuterAccessorProbe
 {
     public ConcurrentQueue<bool> OuterSeenAfterDispatch { get; } = new();
+
+    /// <summary>Same check, keyed by the X-Probe-Id header so concurrent requests can be told apart.</summary>
+    public ConcurrentDictionary<string, bool> OuterSeenByProbeId { get; } = new();
+}
+
+/// <summary>
+/// Holds every armed dispatch inside its endpoint until all N have arrived, so the N accessor scopes are
+/// provably live at the same time (deterministic overlap, no sleeps). Unarmed: passes straight through.
+/// </summary>
+public sealed class DispatchRendezvous
+{
+    private readonly object _gate = new();
+    private int _expected;
+    private int _arrived;
+    private TaskCompletionSource _allArrived = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    public void Arm(int participants)
+    {
+        lock (_gate)
+        {
+            _expected = participants;
+            _arrived = 0;
+            _allArrived = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        }
+    }
+
+    public Task ArriveAsync()
+    {
+        lock (_gate)
+        {
+            if (_expected == 0) return Task.CompletedTask;
+            if (++_arrived == _expected) _allArrived.TrySetResult();
+            // Fail loudly (instead of hanging the suite) if dispatches were serialized and never overlap.
+            return _allArrived.Task.WaitAsync(TimeSpan.FromSeconds(30));
+        }
+    }
 }
 
 public sealed class HttpContextAccessorHost : IAsyncLifetime
@@ -80,6 +116,7 @@ public sealed class HttpContextAccessorHost : IAsyncLifetime
         builder.Services.AddEndpointsApiExplorer();
         builder.Services.AddHttpContextAccessor();
         builder.Services.AddSingleton<OuterAccessorProbe>();
+        builder.Services.AddSingleton<DispatchRendezvous>();
         builder.Services.AddAuthentication(TxnTestAuthHandler.Scheme)
             .AddScheme<AuthenticationSchemeOptions, TxnTestAuthHandler>(TxnTestAuthHandler.Scheme, _ => { });
         builder.Services.AddSingleton<IAuthorizationHandler, TransactionAccessHandler>();
@@ -99,8 +136,11 @@ public sealed class HttpContextAccessorHost : IAsyncLifetime
             if (ctx.Request.Path.StartsWithSegments("/mcp"))
             {
                 var accessor = ctx.RequestServices.GetRequiredService<IHttpContextAccessor>();
-                ctx.RequestServices.GetRequiredService<OuterAccessorProbe>()
-                    .OuterSeenAfterDispatch.Enqueue(ReferenceEquals(accessor.HttpContext, ctx));
+                var probe = ctx.RequestServices.GetRequiredService<OuterAccessorProbe>();
+                var outerIntact = ReferenceEquals(accessor.HttpContext, ctx);
+                probe.OuterSeenAfterDispatch.Enqueue(outerIntact);
+                if (ctx.Request.Headers["X-Probe-Id"].ToString() is { Length: > 0 } probeId)
+                    probe.OuterSeenByProbeId[probeId] = outerIntact;
             }
         });
         app.UseAuthentication();
@@ -117,6 +157,25 @@ public sealed class HttpContextAccessorHost : IAsyncLifetime
         app.MapGet("/api/txn-lookup", (string? txnId) => Results.Ok(new { txnId }))
             .RequireAuthorization("CustomerTransactionAccess")
             .AsMcp("lookup_txn", "Look up a customer transaction by query.");
+
+        // Concurrency: reads the accessor before and after a rendezvous that holds all parallel dispatches open together.
+        app.MapGet("/api/txns-gated/{txnId}", async (string txnId, IHttpContextAccessor accessor, HttpContext http, DispatchRendezvous rendezvous) =>
+            {
+                var before = accessor.HttpContext;
+                await rendezvous.ArriveAsync();
+                var after = accessor.HttpContext;
+                return Results.Ok(new
+                {
+                    txnId,
+                    beforePath = before?.Request.Path.Value,
+                    afterPath = after?.Request.Path.Value,
+                    afterUserTxn = after?.User.FindFirst("txn")?.Value,
+                    beforeIsRequest = ReferenceEquals(before, http),
+                    afterIsRequest = ReferenceEquals(after, http),
+                });
+            })
+            .RequireAuthorization("CustomerTransactionAccess")
+            .AsMcp("get_txn_gated", "Get a customer transaction (test rendezvous).");
 
         app.UseEndpoints(_ => { });
         app.MapZeroMCP();
@@ -182,6 +241,47 @@ public sealed class HttpContextAccessorDispatchTests(HttpContextAccessorHost hos
         AssertOuterUntouched();
     }
 
+    [Fact]
+    public async Task ParallelDispatches_EachSeeOwnSyntheticContext_AndOuterRequestsStayIntact()
+    {
+        const int n = 12;
+        var rendezvous = host.Services.GetRequiredService<DispatchRendezvous>();
+        rendezvous.Arm(n);
+        try
+        {
+            // Caller i owns only txn "P{i}" and asks for it. If the authorization handler or the action read
+            // another flow's synthetic context, the route value would not match the caller's claim (403) or the
+            // echoed path/user would belong to a different caller.
+            var calls = Enumerable.Range(0, n).Select(i =>
+            {
+                var txn = $"P{i}";
+                return CallToolAsync("get_txn_gated", new { txnId = txn }, allowed: txn, probeId: $"probe-{i}");
+            }).ToArray();
+            var responses = await Task.WhenAll(calls);
+
+            for (var i = 0; i < n; i++)
+            {
+                var txn = $"P{i}";
+                var r = responses[i];
+                IsError(r).Should().BeFalse($"caller {i}: {Text(r)}");
+                var echo = JsonDocument.Parse(Text(r)).RootElement;
+                echo.GetProperty("txnId").GetString().Should().Be(txn);
+                echo.GetProperty("beforePath").GetString().Should().Be($"/api/txns-gated/{txn}");
+                echo.GetProperty("afterPath").GetString().Should().Be($"/api/txns-gated/{txn}", "after the rendezvous all scopes overlapped; caller {0} must still see its own request", i);
+                echo.GetProperty("afterUserTxn").GetString().Should().Be(txn);
+                echo.GetProperty("beforeIsRequest").GetBoolean().Should().BeTrue();
+                echo.GetProperty("afterIsRequest").GetBoolean().Should().BeTrue();
+
+                _probe.OuterSeenByProbeId.TryGetValue($"probe-{i}", out var outerIntact).Should().BeTrue();
+                outerIntact.Should().BeTrue($"outer /mcp request {i} must still be what IHttpContextAccessor returns after dispatch");
+            }
+        }
+        finally
+        {
+            rendezvous.Arm(0);
+        }
+    }
+
     private void AssertOuterUntouched()
     {
         var seen = _probe.OuterSeenAfterDispatch.ToArray();
@@ -189,11 +289,13 @@ public sealed class HttpContextAccessorDispatchTests(HttpContextAccessorHost hos
         seen[^1].Should().BeTrue("after dispatch the outer /mcp request must still be what IHttpContextAccessor returns");
     }
 
-    private async Task<JsonObject> CallToolAsync(string name, object arguments, string allowed)
+    private async Task<JsonObject> CallToolAsync(string name, object arguments, string allowed, string? probeId = null)
     {
         var body = JsonSerializer.Serialize(new { jsonrpc = "2.0", id = 1, method = "tools/call", @params = new { name, arguments } });
         using var request = new HttpRequestMessage(HttpMethod.Post, "/mcp") { Content = new StringContent(body, Encoding.UTF8, "application/json") };
         request.Headers.Add("X-Txn-Allowed", allowed);
+        if (probeId is not null)
+            request.Headers.Add("X-Probe-Id", probeId);
         var response = await _client.SendAsync(request);
         return JsonNode.Parse(await response.Content.ReadAsStringAsync())!.AsObject();
     }
