@@ -125,14 +125,23 @@ public sealed class SyntheticHttpContextFactory
         // (not already placed in route values or query string) to the query string.
         // This mirrors how .AsMcp() tools dispatch arguments and handles the case
         // where the API description lookup doesn't find the endpoint's query parameters.
+        //
+        // That diversion is only REST-faithful when the ApiDescription was resolved (a real binder ignores
+        // unknown query params) or the method is safe. For an UNRESOLVED descriptor on an unsafe method the
+        // arguments may belong in a body we know nothing about — silently sending them to the query string
+        // would run the write on defaults, so fail loudly instead (the dispatcher maps this to a 400).
         if (descriptor.ActionDescriptor is null && descriptor.Body is null)
         {
-            foreach (var (key, value) in args)
+            var leftovers = args.Keys.Where(k => !handledParams.Contains(k)).ToList();
+            if (leftovers.Count > 0 && !descriptor.ApiDescriptionResolved && !IsSafeMethod(descriptor.HttpMethod))
             {
-                if (!handledParams.Contains(key))
-                {
-                    queryParts.Add($"{Uri.EscapeDataString(key)}={Uri.EscapeDataString(ExtractStringValue(value))}");
-                }
+                throw new ArgumentException(
+                    $"cannot bind arguments [{string.Join(", ", leftovers)}]: route metadata unresolved for {descriptor.HttpMethod.ToUpperInvariant()} {descriptor.RelativeUrl}");
+            }
+
+            foreach (var key in leftovers)
+            {
+                queryParts.Add($"{Uri.EscapeDataString(key)}={Uri.EscapeDataString(ExtractStringValue(args[key]))}");
             }
         }
 
@@ -271,6 +280,9 @@ public sealed class SyntheticHttpContextFactory
 
         return (new FormCollection(fields, formFiles), null);
     }
+
+    private static bool IsSafeMethod(string? method) =>
+        HttpMethods.IsGet(method ?? "") || HttpMethods.IsHead(method ?? "") || HttpMethods.IsOptions(method ?? "");
 
     private static string ExtractStringValue(JsonElement element) => element.ValueKind switch
     {
