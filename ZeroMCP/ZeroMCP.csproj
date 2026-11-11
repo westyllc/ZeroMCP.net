@@ -9,7 +9,7 @@
     <NoWarn>$(NoWarn);1591</NoWarn>
     <!-- NuGet package -->
     <PackageId>ZeroMCP</PackageId>
-    <Version>2.0.0</Version>
+    <Version>2.0.0-westy.1</Version>
     <Authors>KaladinStorm84</Authors>
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <Description>MCP (Model Context Protocol) server from existing API with Zero duplication, Zero friction</Description>
