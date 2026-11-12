@@ -425,6 +425,25 @@ public sealed class ApiDescriptionResolverTests
     }
 
     [Fact]
+    public void PatternFallback_SingleSameShapeCandidate_Resolves()
+    {
+        var only = Desc("PUT", "api/v1/orders/{orderId}");
+        var provider = new FakeProvider(only, Desc("PUT", "api/v1/orders"), Desc("GET", "api/v1/customers/{id}"));
+        ApiDescriptionResolver.Resolve(provider, Endpoint("/api/v{version:apiVersion}/orders/{id}"), "api/v{version:apiVersion}/orders/{id}", "PUT")
+            .Should().BeSameAs(only);
+    }
+
+    [Fact]
+    public void PatternFallback_AmbiguousSameShapeCandidates_ReturnsNull()
+    {
+        // Both match "api/[^/]+/orders/[^/]+" with the same method: guessing would bind against the wrong endpoint's
+        // metadata and switch off the fail-loud guard, so the resolver must leave it unresolved.
+        var provider = new FakeProvider(Desc("PUT", "api/v1/orders/{orderId}"), Desc("PUT", "api/v2/orders/{orderId}"));
+        ApiDescriptionResolver.Resolve(provider, Endpoint("/api/v{version:apiVersion}/orders/{id}"), "api/v{version:apiVersion}/orders/{id}", "PUT")
+            .Should().BeNull();
+    }
+
+    [Fact]
     public void NoMatch_ReturnsNull()
     {
         var provider = new FakeProvider(Desc("POST", "api/v1/widgets/{id}/extra"), Desc("GET", "api/v1/widgets/{id}"));

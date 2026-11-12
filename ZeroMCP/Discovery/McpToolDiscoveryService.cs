@@ -288,7 +288,7 @@ public sealed class McpToolDiscoveryService
             httpMethod = methodMeta.HttpMethods.First();
 
         // Match minimal API endpoint to ApiDescription for query/body params (AddEndpointsApiExplorer populates these)
-        var apiDesc = ApiDescriptionResolver.Resolve(_apiDescriptionProvider, endpoint, relativeUrl, httpMethod);
+        var apiDesc = ApiDescriptionResolver.Resolve(_apiDescriptionProvider, endpoint, relativeUrl, httpMethod, _logger);
         if (apiDesc is not null)
         {
             foreach (var param in apiDesc.ParameterDescriptions)

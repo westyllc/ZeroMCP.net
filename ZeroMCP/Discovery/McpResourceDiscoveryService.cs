@@ -317,7 +317,7 @@ public sealed class McpResourceDiscoveryService
         if (methodMeta?.HttpMethods is { Count: > 0 })
             httpMethod = methodMeta.HttpMethods[0];
 
-        var apiDesc = ApiDescriptionResolver.Resolve(_apiDescriptionProvider, endpoint, relativeUrl, httpMethod);
+        var apiDesc = ApiDescriptionResolver.Resolve(_apiDescriptionProvider, endpoint, relativeUrl, httpMethod, _logger);
         if (apiDesc is not null)
         {
             foreach (var param in apiDesc.ParameterDescriptions)

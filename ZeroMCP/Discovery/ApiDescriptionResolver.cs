@@ -7,6 +7,7 @@ using Microsoft.AspNetCore.Mvc.Abstractions;
 using Microsoft.AspNetCore.Mvc.ApiExplorer;
 using Microsoft.AspNetCore.Mvc.Controllers;
 using Microsoft.AspNetCore.Routing;
+using Microsoft.Extensions.Logging;
 
 namespace ZeroMCP.Discovery;
 
@@ -24,9 +25,11 @@ namespace ZeroMCP.Discovery;
 /// from the endpoint's metadata collection (verified on net8/net9/net10).</item>
 /// <item>Exact relative-path match (the historical behavior).</item>
 /// <item>Pattern equivalence: every <c>{…}</c> route segment becomes a single-segment wildcard, matched against
-/// candidates with the same HTTP method and segment count.</item>
+/// candidates with the same HTTP method and segment count. Only a unique match counts: if several candidates have the
+/// same shape the endpoint stays unresolved (a warning is logged), so dispatch keeps its fail-loud guard instead of
+/// binding against another endpoint's parameter metadata.</item>
 /// </list>
-/// Returns null when nothing matches. Controller actions are never candidates.
+/// Returns null when nothing (or more than one pattern candidate) matches. Controller actions are never candidates.
 /// </remarks>
 internal static class ApiDescriptionResolver
 {
@@ -36,7 +39,8 @@ internal static class ApiDescriptionResolver
         IApiDescriptionGroupCollectionProvider provider,
         Endpoint endpoint,
         string relativeUrl,
-        string httpMethod)
+        string httpMethod,
+        ILogger? logger = null)
     {
         var candidates = provider.ApiDescriptionGroups.Items
             .SelectMany(g => g.Items)
@@ -65,11 +69,23 @@ internal static class ApiDescriptionResolver
         // (b2) Pattern equivalence ({version:apiVersion} etc. → single-segment wildcard)
         var regex = BuildTemplateRegex(normalized);
         var segmentCount = CountSegments(normalized);
-        foreach (var desc in candidates)
+        var matches = candidates
+            .Where(desc =>
+            {
+                var path = NormalizePath(desc.RelativePath);
+                return CountSegments(path) == segmentCount && regex.IsMatch(path);
+            })
+            .ToList();
+
+        if (matches.Count == 1)
+            return matches[0];
+
+        if (matches.Count > 1)
         {
-            var path = NormalizePath(desc.RelativePath);
-            if (CountSegments(path) == segmentCount && regex.IsMatch(path))
-                return desc;
+            logger?.LogWarning(
+                "ZeroMCP could not resolve ApiExplorer metadata for {HttpMethod} {Route}: {Count} candidates match its shape ({Candidates}). " +
+                "Leaving it unresolved; unsafe calls with non-route arguments will be rejected rather than guessed.",
+                httpMethod, relativeUrl, matches.Count, string.Join(", ", matches.Select(m => m.RelativePath)));
         }
 
         return null;
