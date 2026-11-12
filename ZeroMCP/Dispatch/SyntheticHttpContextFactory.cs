@@ -56,11 +56,13 @@ public sealed class SyntheticHttpContextFactory
         features.Set<IItemsFeature>(new ItemsFeature());
 
         // Pre-build form when we have FormFile params so FormFeature is set before context creation
+        FormCollection? prebuiltForm = null;
         if (descriptor.FormFileParameters.Count > 0)
         {
             var (formCollection, formError) = BuildFormCollection(descriptor, args);
             if (formError is not null)
                 throw new ArgumentException(formError);
+            prebuiltForm = formCollection;
             features.Set<IFormFeature>(new FormFeature(formCollection!));
         }
 
@@ -156,6 +158,11 @@ public sealed class SyntheticHttpContextFactory
         {
             context.Request.ContentType = "multipart/form-data";
             context.Request.Body = new MemoryStream(); // Some pipeline code expects non-null body
+
+            // Re-bind the pre-built form to a request-aware FormFeature. FormFeature(IFormCollection) has no request,
+            // and on net8 its Form/HasFormContentType getters dereference it -> NullReferenceException.
+            if (prebuiltForm is not null)
+                context.Features.Set<IFormFeature>(new FormFeature(context.Request) { Form = prebuiltForm });
         }
         else if (descriptor.Body is not null)
         {
