@@ -152,6 +152,23 @@ public sealed class ZeroMCPOptions
     /// </summary>
     public ClaimsPrincipal? StdioIdentity { get; set; }
 
+    /// <summary>
+    /// <b>INSECURE opt-out — leave false unless you have audited every consumer of <see cref="IHttpContextAccessor"/>.</b>
+    /// <para>
+    /// During tool dispatch ZeroMCP points <see cref="IHttpContextAccessor"/> at the synthetic request built from the tool
+    /// arguments. That swap is only possible for the framework <see cref="HttpContextAccessor"/> on a framework whose
+    /// internals ZeroMCP recognises (see <see cref="ZeroMCP.ZeroMcpCompatibility.AccessorScopeSupported"/>). When it is not
+    /// possible (a custom accessor is registered, or the internals are unsupported), the accessor would keep returning the
+    /// OUTER <c>POST /mcp</c> request, whose query string and headers the caller controls — so authorization handlers and
+    /// actions that read the accessor could be swayed by the caller.
+    /// </para>
+    /// <para>
+    /// Default (<c>false</c>): such dispatches are refused with a 500 and the action is not invoked (fail closed).
+    /// <c>true</c>: the dispatch proceeds with the accessor still resolving to the outer request, and a warning is logged.
+    /// </para>
+    /// </summary>
+    public bool AllowDegradedAccessorDispatch { get; set; }
+
     // --- Legacy SSE Transport (Priority 6) ---
 
     /// <summary>

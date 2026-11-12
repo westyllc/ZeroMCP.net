@@ -3,6 +3,7 @@ using System.Text.Json;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Http.Features;
 using Microsoft.AspNetCore.Routing;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Microsoft.Extensions.Primitives;
 using ZeroMCP.Discovery;
@@ -234,22 +235,56 @@ public sealed class SyntheticHttpContextFactory
     /// <remarks>
     /// The <see cref="IHttpContextAccessor"/> is resolved from <paramref name="services"/>. The swap applies only
     /// when it is, or derives from, the framework <see cref="HttpContextAccessor"/>. Its state is a static
-    /// <c>AsyncLocal</c>, so every instance shares it. <b>Limitation:</b> a custom (non-framework)
-    /// <see cref="IHttpContextAccessor"/> implementation is left alone, and keeps returning whatever it would
-    /// have returned (usually the outer request). The same no-op applies when no accessor is registered, or when
-    /// the framework's private accessor internals are not recognised (see <see cref="HttpContextAccessorScope"/>).
-    /// In all of these cases the returned scope does nothing.
+    /// <c>AsyncLocal</c>, so every instance shares it. When no accessor is registered the returned scope does nothing
+    /// (nothing can observe a wrong context). When an accessor IS registered but cannot be swapped — a custom
+    /// (non-framework) implementation, or framework internals that are not recognised (see
+    /// <see cref="HttpContextAccessorScope"/>) — the call fails closed with
+    /// <see cref="ZeroMcpAccessorScopeRefusedException"/>, unless <see cref="ZeroMCPOptions.AllowDegradedAccessorDispatch"/>
+    /// is set, in which case a warning is logged and the returned scope does nothing (the accessor keeps returning the
+    /// outer request).
     /// </remarks>
+    /// <exception cref="ZeroMcpAccessorScopeRefusedException">
+    /// An accessor is registered but cannot be pointed at the synthetic request, and
+    /// <see cref="ZeroMCPOptions.AllowDegradedAccessorDispatch"/> is false (the default).
+    /// </exception>
     public IDisposable EnterHttpContextAccessorScope(HttpContext syntheticContext, IServiceProvider services)
     {
-        if (services.GetService(typeof(IHttpContextAccessor)) is HttpContextAccessor)
+        var accessor = services.GetService(typeof(IHttpContextAccessor));
+
+        // Nothing registered: nothing can observe a wrong context.
+        if (accessor is null)
+            return NoopScope.Instance;
+
+        string reason;
+        if (accessor is HttpContextAccessor)
         {
             var scope = HttpContextAccessorScope.Enter(syntheticContext);
             if (scope is not null)
                 return scope;
+            reason = "ZeroMCP does not recognise the HttpContextAccessor internals on this framework version " +
+                     "(ZeroMcpCompatibility.AccessorScopeSupported is false)";
         }
+        else
+        {
+            reason = $"the registered IHttpContextAccessor is a custom implementation ({accessor.GetType().FullName}), " +
+                     "not the framework HttpContextAccessor";
+        }
+
+        if (!_options.AllowDegradedAccessorDispatch)
+            throw new ZeroMcpAccessorScopeRefusedException(reason);
+
+        Logger.LogWarning(
+            "INSECURE: ZeroMCP cannot point IHttpContextAccessor at the synthetic request because {Reason}. " +
+            "AllowDegradedAccessorDispatch is enabled, so dispatch proceeds and IHttpContextAccessor.HttpContext resolves to the " +
+            "OUTER MCP request (caller-controlled query string and headers) in authorization handlers, filters and the action.",
+            reason);
         return NoopScope.Instance;
     }
+
+    private ILogger? _logger;
+    private ILogger Logger => _logger ??=
+        (_serviceProvider.GetService(typeof(ILoggerFactory)) as ILoggerFactory)?.CreateLogger<SyntheticHttpContextFactory>()
+        ?? (ILogger)Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance;
 
     private sealed class NoopScope : IDisposable
     {
@@ -358,4 +393,25 @@ internal sealed class CancellableHttpRequestLifetimeFeature : IHttpRequestLifeti
     public CancellableHttpRequestLifetimeFeature(CancellationToken requestAborted) => RequestAborted = requestAborted;
     public CancellationToken RequestAborted { get; set; }
     public void Abort() { /* no-op for synthetic */ }
+}
+
+/// <summary>
+/// Thrown by <see cref="SyntheticHttpContextFactory.EnterHttpContextAccessorScope"/> when an
+/// <see cref="IHttpContextAccessor"/> is registered but cannot be made to resolve to the synthetic request,
+/// and the insecure opt-out <see cref="ZeroMCPOptions.AllowDegradedAccessorDispatch"/> is not enabled.
+/// The dispatcher turns it into a 500 and does not invoke the tool.
+/// </summary>
+public sealed class ZeroMcpAccessorScopeRefusedException : InvalidOperationException
+{
+    public ZeroMcpAccessorScopeRefusedException(string reason)
+        : base($"ZeroMCP refused to dispatch the tool: {reason}, so IHttpContextAccessor.HttpContext would resolve to the outer " +
+               "MCP request (caller-controlled) instead of the synthetic tool request. Use the framework accessor " +
+               "(services.AddHttpContextAccessor()) on a supported framework, or set ZeroMCPOptions.AllowDegradedAccessorDispatch = true to accept " +
+               "this (insecure).")
+    {
+        Reason = reason;
+    }
+
+    /// <summary>Why the swap could not be performed.</summary>
+    public string Reason { get; }
 }

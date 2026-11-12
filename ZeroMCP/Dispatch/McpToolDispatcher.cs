@@ -61,7 +61,8 @@ public sealed class McpToolDispatcher
 
         if (!HttpContextAccessorScope.IsSupported)
             _logger.LogWarning("ZeroMCP could not recognise HttpContextAccessor internals on this framework; " +
-                "IHttpContextAccessor.HttpContext will resolve to the outer MCP request during tool dispatch.");
+                "tool dispatch will be refused (500) while the framework IHttpContextAccessor is registered, unless " +
+                "ZeroMCPOptions.AllowDegradedAccessorDispatch is enabled (insecure: the accessor then resolves to the outer MCP request).");
     }
 
     /// <summary>
@@ -94,7 +95,18 @@ public sealed class McpToolDispatcher
 
         // IHttpContextAccessor must resolve to the synthetic request (not the outer POST /mcp) for authorization,
         // filters and the action; disposal (end of method, i.e. a finally) restores the previous value.
-        using var accessorScope = _contextFactory.EnterHttpContextAccessorScope(context, scope.ServiceProvider);
+        // Fail closed: if the swap is impossible (and the insecure opt-out is off), refuse before authorization runs.
+        IDisposable accessorScope;
+        try
+        {
+            accessorScope = _contextFactory.EnterHttpContextAccessorScope(context, scope.ServiceProvider);
+        }
+        catch (ZeroMcpAccessorScopeRefusedException ex)
+        {
+            _logger.LogError(ex, "Refused dispatch of tool '{ToolName}': {Reason}", descriptor.Name, ex.Reason);
+            return DispatchResult.Failure(500, ex.Message);
+        }
+        using var accessorLease = accessorScope;
 
         // Set endpoint when available so pipeline (e.g. CreatedAtAction, LinkGenerator) sees a matched endpoint
         if (descriptor.Endpoint is not null)
@@ -186,7 +198,18 @@ public sealed class McpToolDispatcher
             }
 
             // Covers authorization, invocation and enumeration of the captured stream; restored on exit.
-            using var accessorScope = _contextFactory.EnterHttpContextAccessorScope(context, scope.ServiceProvider);
+            IDisposable accessorScope;
+            try
+            {
+                accessorScope = _contextFactory.EnterHttpContextAccessorScope(context, scope.ServiceProvider);
+            }
+            catch (ZeroMcpAccessorScopeRefusedException ex)
+            {
+                _logger.LogError(ex, "Refused streaming dispatch of tool '{ToolName}': {Reason}", descriptor.Name, ex.Reason);
+                await writer.WriteAsync(new DispatchStreamChunk { Content = ex.Message, IsLast = true, IsError = true }, cancellationToken);
+                return;
+            }
+            using var accessorLease = accessorScope;
 
             if (descriptor.Endpoint is not null)
                 context.SetEndpoint(descriptor.Endpoint);

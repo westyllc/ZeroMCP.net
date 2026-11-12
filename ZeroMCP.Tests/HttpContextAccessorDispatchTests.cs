@@ -282,6 +282,41 @@ public sealed class HttpContextAccessorDispatchTests(HttpContextAccessorHost hos
         }
     }
 
+    // Attacker-shaped: the caller puts an OWNED txn id in the outer /mcp query string and asks the tool for one it
+    // does NOT own. The requirement reads route-then-query through the accessor; because the accessor resolves to
+    // the SYNTHETIC request, it sees the route value (T2) and refuses. The outer query cannot sway it.
+    [Fact]
+    public async Task Attacker_OuterQueryNamesOwnedTxn_ToolArgsNotOwned_Is403()
+    {
+        var response = await CallToolAsync("get_txn", new { txnId = "T2" }, allowed: "T1", url: "/mcp?txnId=T1");
+
+        IsError(response).Should().BeTrue(Text(response));
+        StatusCode(response).Should().Be(403);
+        AssertOuterUntouched();
+    }
+
+    [Fact]
+    public async Task Attacker_OuterQueryNamesUnownedTxn_ToolArgsOwned_Is200()
+    {
+        var response = await CallToolAsync("get_txn", new { txnId = "T1" }, allowed: "T1", url: "/mcp?txnId=T9");
+
+        IsError(response).Should().BeFalse(Text(response));
+        StatusCode(response).Should().Be(200);
+        JsonDocument.Parse(Text(response)).RootElement.GetProperty("txnId").GetString().Should().Be("T1");
+        AssertOuterUntouched();
+    }
+
+    [Fact]
+    public async Task Attacker_QueryTool_OuterQueryNamesOwnedTxn_NoToolArg_Is403()
+    {
+        // The synthetic request's query string is built only from tool args, so the outer ?txnId does not leak in.
+        var response = await CallToolAsync("lookup_txn", new { }, allowed: "T1", url: "/mcp?txnId=T1");
+
+        IsError(response).Should().BeTrue(Text(response));
+        StatusCode(response).Should().Be(403);
+        AssertOuterUntouched();
+    }
+
     private void AssertOuterUntouched()
     {
         var seen = _probe.OuterSeenAfterDispatch.ToArray();
@@ -289,10 +324,10 @@ public sealed class HttpContextAccessorDispatchTests(HttpContextAccessorHost hos
         seen[^1].Should().BeTrue("after dispatch the outer /mcp request must still be what IHttpContextAccessor returns");
     }
 
-    private async Task<JsonObject> CallToolAsync(string name, object arguments, string allowed, string? probeId = null)
+    private async Task<JsonObject> CallToolAsync(string name, object arguments, string allowed, string? probeId = null, string url = "/mcp")
     {
         var body = JsonSerializer.Serialize(new { jsonrpc = "2.0", id = 1, method = "tools/call", @params = new { name, arguments } });
-        using var request = new HttpRequestMessage(HttpMethod.Post, "/mcp") { Content = new StringContent(body, Encoding.UTF8, "application/json") };
+        using var request = new HttpRequestMessage(HttpMethod.Post, url) { Content = new StringContent(body, Encoding.UTF8, "application/json") };
         request.Headers.Add("X-Txn-Allowed", allowed);
         if (probeId is not null)
             request.Headers.Add("X-Probe-Id", probeId);
@@ -316,10 +351,11 @@ public sealed class HttpContextAccessorScopeTests
         public HttpContext? HttpContext { get; set; }
     }
 
-    private static SyntheticHttpContextFactory Factory()
+    private static SyntheticHttpContextFactory Factory(bool allowDegraded = false)
     {
         var sp = new ServiceCollection().AddOptions().BuildServiceProvider();
-        return new SyntheticHttpContextFactory(new DefaultHttpContextFactory(sp), sp, Microsoft.Extensions.Options.Options.Create(new ZeroMCPOptions()));
+        return new SyntheticHttpContextFactory(new DefaultHttpContextFactory(sp), sp,
+            Microsoft.Extensions.Options.Options.Create(new ZeroMCPOptions { AllowDegradedAccessorDispatch = allowDegraded }));
     }
 
     private static IServiceProvider ServicesWith(IHttpContextAccessor accessor) =>
@@ -330,6 +366,7 @@ public sealed class HttpContextAccessorScopeTests
     {
         // Tripwire: if a framework update renames HttpContextAccessor internals, the swap silently becomes a no-op.
         HttpContextAccessorScope.IsSupported.Should().BeTrue();
+        ZeroMcpCompatibility.AccessorScopeSupported.Should().BeTrue("the public support signal must mirror the internal one");
     }
 
     [Fact]
@@ -380,13 +417,24 @@ public sealed class HttpContextAccessorScopeTests
     }
 
     [Fact]
-    public void CustomAccessor_IsLeftAlone()
+    public void CustomAccessor_DefaultOptions_IsRefused()
+    {
+        var custom = new CustomAccessor { HttpContext = new DefaultHttpContext() };
+
+        var act = () => Factory().EnterHttpContextAccessorScope(new DefaultHttpContext(), ServicesWith(custom));
+
+        act.Should().Throw<ZeroMcpAccessorScopeRefusedException>()
+            .Which.Message.Should().Contain(typeof(CustomAccessor).FullName!).And.Contain("AllowDegradedAccessorDispatch");
+    }
+
+    [Fact]
+    public void CustomAccessor_WithDegradedOptOut_IsLeftAlone()
     {
         var custom = new CustomAccessor();
         var outer = new DefaultHttpContext();
         custom.HttpContext = outer;
 
-        using (Factory().EnterHttpContextAccessorScope(new DefaultHttpContext(), ServicesWith(custom)))
+        using (Factory(allowDegraded: true).EnterHttpContextAccessorScope(new DefaultHttpContext(), ServicesWith(custom)))
             custom.HttpContext.Should().BeSameAs(outer);
         custom.HttpContext.Should().BeSameAs(outer);
     }
