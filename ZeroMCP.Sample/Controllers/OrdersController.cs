@@ -118,7 +118,8 @@ public class OrdersController : ControllerBase
     [Mcp("stream_orders", Description = "Streams all orders progressively with a simulated delay between each item.")]
     public async IAsyncEnumerable<Order> StreamOrders([System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
-        foreach (var order in Store)
+        // Snapshot: Store is shared and mutable (create_order), and this enumeration spans seconds.
+        foreach (var order in Store.ToList())
         {
             cancellationToken.ThrowIfCancellationRequested();
             await Task.Delay(250, cancellationToken);
